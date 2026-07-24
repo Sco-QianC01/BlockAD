@@ -1,32 +1,82 @@
 name: Sync upstream
 
 on:
-  schedule:
-    - cron: "17 */6 * * *"
   workflow_dispatch:
+  schedule:
+    - cron: '17 */6 * * *'
 
 permissions:
   contents: write
 
+concurrency:
+  group: sync-upstream-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TARGET_BRANCH: main
+  UPSTREAM_REPOSITORY: cmliu/edgetunnel
+
 jobs:
   sync:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          token: ${{ secrets.SYNC_UPSTREAM_TOKEN || github.token }}
+          persist-credentials: true
 
-      - name: Add upstream
+      - name: Sync upstream safely
+        shell: bash
         run: |
-          git remote add upstream https://github.com/cmliu/edgetunnel.git
-          git fetch upstream
+          set -euo pipefail
 
-      - name: Sync default branch
-        run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout main
-          git merge upstream/main --no-edit
-          git push origin main
+
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch origin "${TARGET_BRANCH}"
+          git fetch upstream "${TARGET_BRANCH}"
+          git checkout "${TARGET_BRANCH}"
+          git reset --hard "origin/${TARGET_BRANCH}"
+
+          pushed=0
+          if git merge --ff-only "upstream/${TARGET_BRANCH}"; then
+            if git diff --quiet "origin/${TARGET_BRANCH}"..HEAD; then
+              echo "Already up to date with ${UPSTREAM_REPOSITORY}:${TARGET_BRANCH}." >> "$GITHUB_STEP_SUMMARY"
+            else
+              git push origin "${TARGET_BRANCH}"
+              pushed=1
+              echo "Fast-forwarded from ${UPSTREAM_REPOSITORY}:${TARGET_BRANCH}." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            git merge --abort || true
+            if git merge --no-edit "upstream/${TARGET_BRANCH}"; then
+              git push origin "${TARGET_BRANCH}"
+              pushed=1
+              echo "Merged upstream ${UPSTREAM_REPOSITORY}:${TARGET_BRANCH}." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "Upstream sync has conflicts and was left unchanged." >> "$GITHUB_STEP_SUMMARY"
+              echo "Conflicted files:" >> "$GITHUB_STEP_SUMMARY"
+              git diff --name-only --diff-filter=U | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY" || true
+              git merge --abort || true
+              exit 1
+            fi
+          fi
+
+          # GitHub disables scheduled workflows in inactive public repositories.
+          # If no upstream change was pushed for a long time, create a tiny keepalive commit.
+          if [[ "$pushed" == "0" ]]; then
+            last_commit_ts=$(git log -1 --format=%ct "origin/${TARGET_BRANCH}")
+            now_ts=$(date -u +%s)
+            if (( now_ts - last_commit_ts > 3888000 )); then
+              mkdir -p .github
+              date -u +"last successful upstream check: %Y-%m-%dT%H:%M:%SZ" > .github/sync-upstream-keepalive.txt
+              git add .github/sync-upstream-keepalive.txt
+              if git commit -m "chore: keep upstream sync workflow active"; then
+                git push origin "${TARGET_BRANCH}"
+                echo "Created keepalive commit to keep scheduled workflow active." >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
+          fi
