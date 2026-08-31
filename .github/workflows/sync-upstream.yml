@@ -57,11 +57,21 @@ jobs:
               pushed=1
               echo "Merged upstream ${UPSTREAM_REPOSITORY}:${TARGET_BRANCH}." >> "$GITHUB_STEP_SUMMARY"
             else
-              echo "Upstream sync has conflicts and was left unchanged." >> "$GITHUB_STEP_SUMMARY"
-              echo "Conflicted files:" >> "$GITHUB_STEP_SUMMARY"
-              git diff --name-only --diff-filter=U | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY" || true
-              git merge --abort || true
-              exit 1
+              conflicts=$(git diff --name-only --diff-filter=U)
+              if [[ "$conflicts" == ".github/workflows/sync.yml" ]]; then
+                git checkout --ours -- .github/workflows/sync.yml
+                git add .github/workflows/sync.yml
+                git commit --no-edit
+                git push origin "${TARGET_BRANCH}"
+                pushed=1
+                echo "Merged upstream while preserving the fork-owned .github/workflows/sync.yml." >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "Upstream sync has conflicts and was left unchanged." >> "$GITHUB_STEP_SUMMARY"
+                echo "Conflicted files:" >> "$GITHUB_STEP_SUMMARY"
+                printf '%s\n' "$conflicts" | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY" || true
+                git merge --abort || true
+                exit 1
+              fi
             fi
           fi
 
